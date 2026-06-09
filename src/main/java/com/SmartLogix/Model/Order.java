@@ -4,6 +4,8 @@ import com.SmartLogix.Enum.OrderStatus;
 import jakarta.persistence.*;
 import lombok.*;
 
+import java.time.LocalDateTime;
+
 @Entity
 @Data
 @Table(name = "ordenes")
@@ -20,6 +22,9 @@ public class Order {
     private String productoCodigo;
     private Integer cantidad;
     private String almacenCodigo;
+
+    private String username;
+    private LocalDateTime fecha;
 
     @Enumerated(EnumType.STRING)
     private OrderStatus estado;
