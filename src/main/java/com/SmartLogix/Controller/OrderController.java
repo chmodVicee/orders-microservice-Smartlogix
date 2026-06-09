@@ -1,5 +1,6 @@
 package com.SmartLogix.Controller;
 
+import com.SmartLogix.Dto.OrderResponseDTO;
 import com.SmartLogix.Model.Order;
 import com.SmartLogix.Service.OrderService;
 import lombok.RequiredArgsConstructor;
@@ -23,7 +24,8 @@ public class OrderController {
     }
 
     @GetMapping("/all")
-    public ResponseEntity<List<Order>> getAll() {
-        return ResponseEntity.ok(orderService.getAllOrders());
+    public ResponseEntity<List<OrderResponseDTO>> getAll() {
+        // Ahora devuelve la lista de órdenes enriquecida con los datos del usuario
+        return ResponseEntity.ok(orderService.getAllOrdersWithUsers());
     }
 }

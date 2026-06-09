@@ -1,72 +1,99 @@
 package com.SmartLogix.Service;
 
-import com.SmartLogix.Client.InventoryClient;
+import com.SmartLogix.Dto.OrderResponseDTO;
 import com.SmartLogix.Model.Order;
-import com.SmartLogix.Enum.OrderStatus;
 import com.SmartLogix.Repository.OrderRepository;
-import io.github.resilience4j.circuitbreaker.annotation.CircuitBreaker;
+import jakarta.servlet.http.HttpServletRequest;
 import lombok.RequiredArgsConstructor;
 import lombok.extern.slf4j.Slf4j;
+import org.springframework.http.*;
 import org.springframework.stereotype.Service;
+import org.springframework.web.client.RestTemplate;
 
+import java.util.ArrayList;
+import java.util.HashMap;
 import java.util.List;
-import java.util.UUID;
+import java.util.Map;
 
-@Slf4j
 @Service
 @RequiredArgsConstructor
+@Slf4j
 public class OrderService {
 
     private final OrderRepository orderRepository;
-    private final InventoryClient inventoryClient;
+    private final HttpServletRequest request;
+    private final RestTemplate restTemplate = new RestTemplate();
 
-    @CircuitBreaker(name = "inventoryService", fallbackMethod = "placeOrderFallback")
-    public Order placeOrder(Order request) {
-        var inventory = inventoryClient.getTotalStock(request.getProductoCodigo());
+    public List<OrderResponseDTO> getAllOrdersWithUsers() {
+        List<Order> listaDeOrdenes = orderRepository.findAll();
+        List<OrderResponseDTO> responseList = new ArrayList<>();
 
-        if (inventory != null && inventory.getStock() >= request.getCantidad()) {
-            Order order = Order.builder()
-                    .numeroPedido(UUID.randomUUID().toString())
-                    .productoCodigo(request.getProductoCodigo())
-                    .cantidad(request.getCantidad())
-                    .estado(OrderStatus.PENDIENTE)
-                    .build();
+        String bearerToken = request.getHeader("Authorization");
 
-            return orderRepository.save(order);
-        } else {
-            throw new RuntimeException("Stock insuficiente. Disponible total: " +
-                    (inventory != null ? inventory.getStock() : 0));
+        HttpHeaders headers = new HttpHeaders();
+        headers.setContentType(MediaType.APPLICATION_JSON);
+        if (bearerToken != null) {
+            headers.set("Authorization", bearerToken);
         }
+        HttpEntity<Void> entity = new HttpEntity<>(headers);
+
+        Object userData = null;
+        try {
+            String usersUrl = "http://localhost:8083/api/users/profile";
+            ResponseEntity<Object> userResponse = restTemplate.exchange(usersUrl, HttpMethod.GET, entity, Object.class);
+            userData = userResponse.getBody();
+        } catch (Exception e) {
+            log.error("No se pudieron obtener los datos del usuario: {}", e.getMessage());
+            userData = "Detalles del usuario no disponibles temporalmente";
+        }
+
+        for (Order unaOrden : listaDeOrdenes) {
+            responseList.add(new OrderResponseDTO(unaOrden, userData));
+        }
+
+        return responseList;
     }
 
-    private Order placeOrderFallback(Order request, Throwable ex) {
-        log.error("[CircuitBreaker] InventoryService no disponible: {}", ex.getMessage());
+    public Order placeOrder(Order order) {
+        String bearerToken = request.getHeader("Authorization");
 
-        Order fallbackOrder = Order.builder()
-                .numeroPedido(UUID.randomUUID().toString())
-                .productoCodigo(request.getProductoCodigo())
-                .cantidad(request.getCantidad())
-                .estado(OrderStatus.PENDIENTE)
-                .build();
+        String usernameActual = org.springframework.security.core.context.SecurityContextHolder
+                .getContext().getAuthentication().getName();
 
-        return orderRepository.save(fallbackOrder);
+        order.setUsername(usernameActual);
+        order.setFecha(java.time.LocalDateTime.now());
 
-    }
+        if (order.getNumeroPedido() == null || order.getNumeroPedido().isEmpty()) {
+            order.setNumeroPedido("PED-" + System.currentTimeMillis());
+        }
 
-    public List<Order> getAllOrders() {
-        return orderRepository.findAll();
-    }
+        if (order.getEstado() == null) {
+            order.setEstado(com.SmartLogix.Enum.OrderStatus.PENDIENTE);
+        }
 
-    public Order getOrderByNumero(String numeroPedido) {
-        return orderRepository.findAll().stream()
-                .filter(o -> o.getNumeroPedido().equals(numeroPedido))
-                .findFirst()
-                .orElseThrow(() -> new RuntimeException("Pedido no encontrado: " + numeroPedido));
-    }
+        Order savedOrder = orderRepository.save(order);
 
-    public Order updateOrderStatus(String numeroPedido, OrderStatus nuevoEstado) {
-        Order order = getOrderByNumero(numeroPedido);
-        order.setEstado(nuevoEstado);
-        return orderRepository.save(order);
+        HttpHeaders headers = new HttpHeaders();
+        headers.setContentType(MediaType.APPLICATION_JSON);
+        if (bearerToken != null) {
+            headers.set("Authorization", bearerToken);
+        }
+
+        Map<String, Object> inventoryRequest = new HashMap<>();
+        inventoryRequest.put("productoCodigo", savedOrder.getProductoCodigo());
+        inventoryRequest.put("almacenCodigo", savedOrder.getAlmacenCodigo());
+        inventoryRequest.put("stock", savedOrder.getCantidad());
+
+        HttpEntity<Map<String, Object>> inventoryEntity = new HttpEntity<>(inventoryRequest, headers);
+
+        try {
+            String inventoryUrl = "http://localhost:8082/api/inventory/update";
+            restTemplate.exchange(inventoryUrl, HttpMethod.POST, inventoryEntity, Object.class);
+            log.info("Inventario actualizado con éxito mediante /update para la orden: {}", savedOrder.getId());
+        } catch (Exception e) {
+            log.error("Error al intentar actualizar el stock en el Microservicio de Inventario: {}", e.getMessage());
+        }
+
+        return savedOrder;
     }
 }
