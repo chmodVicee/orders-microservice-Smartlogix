@@ -56,22 +56,16 @@ public class OrderService {
 
     public Order placeOrder(Order order) {
         String bearerToken = request.getHeader("Authorization");
-
         String usernameActual = org.springframework.security.core.context.SecurityContextHolder
                 .getContext().getAuthentication().getName();
-
         order.setUsername(usernameActual);
         order.setFecha(java.time.LocalDateTime.now());
-
         if (order.getNumeroPedido() == null || order.getNumeroPedido().isEmpty()) {
             order.setNumeroPedido("PED-" + System.currentTimeMillis());
         }
-
         if (order.getEstado() == null) {
             order.setEstado(com.SmartLogix.Enum.OrderStatus.PENDIENTE);
         }
-
-        Order savedOrder = orderRepository.save(order);
 
         HttpHeaders headers = new HttpHeaders();
         headers.setContentType(MediaType.APPLICATION_JSON);
@@ -79,13 +73,33 @@ public class OrderService {
             headers.set("Authorization", bearerToken);
         }
 
+        String getStockUrl = "http://localhost:8082/api/inventory/" + order.getProductoCodigo() + "/" + order.getAlmacenCodigo();
+        Map stockActualResponse;
+        try {
+            ResponseEntity<Map> stockResponse = restTemplate.exchange(
+                    getStockUrl, HttpMethod.GET, new HttpEntity<>(headers), Map.class);
+            stockActualResponse = stockResponse.getBody();
+        } catch (Exception e) {
+            log.error("No se pudo obtener el stock actual para {} en {}: {}",
+                    order.getProductoCodigo(), order.getAlmacenCodigo(), e.getMessage());
+            throw new IllegalStateException("No se pudo verificar el stock disponible para este producto/almacén");
+        }
+
+        int stockActual = ((Number) stockActualResponse.get("stock")).intValue();
+        int nuevoStock = stockActual - order.getCantidad();
+
+        if (nuevoStock < 0) {
+            throw new IllegalStateException(
+                    "Stock insuficiente. Disponible: " + stockActual + ", solicitado: " + order.getCantidad());
+        }
+
+        Order savedOrder = orderRepository.save(order);
+
         Map<String, Object> inventoryRequest = new HashMap<>();
         inventoryRequest.put("productoCodigo", savedOrder.getProductoCodigo());
         inventoryRequest.put("almacenCodigo", savedOrder.getAlmacenCodigo());
-        inventoryRequest.put("stock", savedOrder.getCantidad());
-
+        inventoryRequest.put("stock", nuevoStock);
         HttpEntity<Map<String, Object>> inventoryEntity = new HttpEntity<>(inventoryRequest, headers);
-
         try {
             String inventoryUrl = "http://localhost:8082/api/inventory/update";
             restTemplate.exchange(inventoryUrl, HttpMethod.POST, inventoryEntity, Object.class);
@@ -93,7 +107,6 @@ public class OrderService {
         } catch (Exception e) {
             log.error("Error al intentar actualizar el stock en el Microservicio de Inventario: {}", e.getMessage());
         }
-
         return savedOrder;
     }
 }
