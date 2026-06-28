@@ -28,4 +28,7 @@ public class Order {
 
     @Enumerated(EnumType.STRING)
     private OrderStatus estado;
+
+    @Column(name = "inventario_sincronizado")
+    private Boolean inventarioSincronizado = false;
 }
