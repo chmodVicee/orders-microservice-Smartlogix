@@ -1,8 +1,10 @@
 package com.SmartLogix.Service;
 
 import com.SmartLogix.Dto.OrderResponseDTO;
+import com.SmartLogix.Enum.OrderStatus;
 import com.SmartLogix.Model.Order;
 import com.SmartLogix.Repository.OrderRepository;
+import jakarta.persistence.EntityNotFoundException;
 import jakarta.servlet.http.HttpServletRequest;
 import lombok.RequiredArgsConstructor;
 import lombok.extern.slf4j.Slf4j;
@@ -114,6 +116,32 @@ public class OrderService {
             log.warn("Inventory MS no disponible. Orden '{}' guardada y en cola para sincronizacion.", order.getNumeroPedido());
             order.setInventarioSincronizado(false);
             return orderRepository.save(order);
+        }
+    }
+
+    public Order updateOrderStatus(Long id, OrderStatus nuevoEstado) {
+        Order order = orderRepository.findById(id)
+                .orElseThrow(() -> new EntityNotFoundException("Orden no encontrada: " + id));
+        order.setEstado(nuevoEstado);
+        orderRepository.save(order);
+        log.info("Estado de orden {} actualizado manualmente a {}", id, nuevoEstado);
+        return order;
+    }
+
+    @Scheduled(fixedDelay = 30000)
+    public void avanzarEstadoOrdenes() {
+        List<Order> procesadas = orderRepository.findByEstado(OrderStatus.PROCESADO);
+        for (Order orden : procesadas) {
+            orden.setEstado(OrderStatus.COMPLETADO);
+            orderRepository.save(orden);
+            log.info("Orden {} avanzada de PROCESADO a COMPLETADO.", orden.getId());
+        }
+
+        List<Order> pendientes = orderRepository.findByEstado(OrderStatus.PENDIENTE);
+        for (Order orden : pendientes) {
+            orden.setEstado(OrderStatus.PROCESADO);
+            orderRepository.save(orden);
+            log.info("Orden {} avanzada de PENDIENTE a PROCESADO.", orden.getId());
         }
     }
 
