@@ -1,6 +1,7 @@
 package com.SmartLogix.Controller;
 
 import com.SmartLogix.Dto.OrderResponseDTO;
+import com.SmartLogix.Enum.OrderStatus;
 import com.SmartLogix.Model.Order;
 import com.SmartLogix.Service.OrderService;
 import lombok.RequiredArgsConstructor;
@@ -25,7 +26,11 @@ public class OrderController {
 
     @GetMapping("/all")
     public ResponseEntity<List<OrderResponseDTO>> getAll() {
-        // Ahora devuelve la lista de órdenes enriquecida con los datos del usuario
         return ResponseEntity.ok(orderService.getAllOrdersWithUsers());
+    }
+
+    @PutMapping("/{id}/status")
+    public ResponseEntity<Order> updateStatus(@PathVariable Long id, @RequestParam OrderStatus estado) {
+        return ResponseEntity.ok(orderService.updateOrderStatus(id, estado));
     }
 }

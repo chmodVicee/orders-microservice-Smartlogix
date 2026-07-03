@@ -8,7 +8,7 @@ import java.time.LocalDateTime;
 
 @Entity
 @Data
-@Table(name = "ordenes")
+@Table(name = "orders")
 @NoArgsConstructor
 @AllArgsConstructor
 @Builder
@@ -28,4 +28,7 @@ public class Order {
 
     @Enumerated(EnumType.STRING)
     private OrderStatus estado;
+
+    @Column(name = "inventario_sincronizado")
+    private Boolean inventarioSincronizado = false;
 }

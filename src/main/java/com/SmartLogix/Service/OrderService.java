@@ -1,12 +1,15 @@
 package com.SmartLogix.Service;
 
 import com.SmartLogix.Dto.OrderResponseDTO;
+import com.SmartLogix.Enum.OrderStatus;
 import com.SmartLogix.Model.Order;
 import com.SmartLogix.Repository.OrderRepository;
+import jakarta.persistence.EntityNotFoundException;
 import jakarta.servlet.http.HttpServletRequest;
 import lombok.RequiredArgsConstructor;
 import lombok.extern.slf4j.Slf4j;
 import org.springframework.http.*;
+import org.springframework.scheduling.annotation.Scheduled;
 import org.springframework.stereotype.Service;
 import org.springframework.web.client.RestTemplate;
 
@@ -23,6 +26,8 @@ public class OrderService {
     private final OrderRepository orderRepository;
     private final HttpServletRequest request;
     private final RestTemplate restTemplate = new RestTemplate();
+
+    private static final String INVENTORY_BASE = "http://localhost:8082/api/inventory";
 
     public List<OrderResponseDTO> getAllOrdersWithUsers() {
         List<Order> listaDeOrdenes = orderRepository.findAll();
@@ -73,40 +78,119 @@ public class OrderService {
             headers.set("Authorization", bearerToken);
         }
 
-        String getStockUrl = "http://localhost:8082/api/inventory/" + order.getProductoCodigo() + "/" + order.getAlmacenCodigo();
-        Map stockActualResponse;
         try {
+            String getStockUrl = INVENTORY_BASE + "/" + order.getProductoCodigo() + "/" + order.getAlmacenCodigo();
             ResponseEntity<Map> stockResponse = restTemplate.exchange(
                     getStockUrl, HttpMethod.GET, new HttpEntity<>(headers), Map.class);
-            stockActualResponse = stockResponse.getBody();
+            Map stockActualResponse = stockResponse.getBody();
+
+            int stockActual = ((Number) stockActualResponse.get("stock")).intValue();
+            int nuevoStock = stockActual - order.getCantidad();
+
+            if (nuevoStock < 0) {
+                throw new IllegalStateException(
+                        "Stock insuficiente. Disponible: " + stockActual + ", solicitado: " + order.getCantidad());
+            }
+            Order savedOrder = orderRepository.save(order);
+
+            Map<String, Object> inventoryRequest = new HashMap<>();
+            inventoryRequest.put("productoCodigo", savedOrder.getProductoCodigo());
+            inventoryRequest.put("almacenCodigo", savedOrder.getAlmacenCodigo());
+            inventoryRequest.put("stock", nuevoStock);
+
+            try {
+                restTemplate.exchange(INVENTORY_BASE + "/update",
+                        HttpMethod.POST, new HttpEntity<>(inventoryRequest, headers), Object.class);
+                savedOrder.setInventarioSincronizado(true);
+                orderRepository.save(savedOrder);
+                log.info("Orden {} creada y stock sincronizado correctamente.", savedOrder.getId());
+            } catch (Exception e) {
+                log.warn("Orden {} guardada pero no se pudo actualizar el stock. Se reintentará automáticamente.", savedOrder.getId());
+            }
+
+            return savedOrder;
+
+        } catch (IllegalStateException e) {
+            throw e;
         } catch (Exception e) {
-            log.error("No se pudo obtener el stock actual para {} en {}: {}",
-                    order.getProductoCodigo(), order.getAlmacenCodigo(), e.getMessage());
-            throw new IllegalStateException("No se pudo verificar el stock disponible para este producto/almacén");
+            log.warn("Inventory MS no disponible. Orden '{}' guardada y en cola para sincronizacion.", order.getNumeroPedido());
+            order.setInventarioSincronizado(false);
+            return orderRepository.save(order);
+        }
+    }
+
+    public Order updateOrderStatus(Long id, OrderStatus nuevoEstado) {
+        Order order = orderRepository.findById(id)
+                .orElseThrow(() -> new EntityNotFoundException("Orden no encontrada: " + id));
+        order.setEstado(nuevoEstado);
+        orderRepository.save(order);
+        log.info("Estado de orden {} actualizado manualmente a {}", id, nuevoEstado);
+        return order;
+    }
+
+    @Scheduled(fixedDelay = 30000)
+    public void avanzarEstadoOrdenes() {
+        List<Order> procesadas = orderRepository.findByEstado(OrderStatus.PROCESADO);
+        for (Order orden : procesadas) {
+            orden.setEstado(OrderStatus.COMPLETADO);
+            orderRepository.save(orden);
+            log.info("Orden {} avanzada de PROCESADO a COMPLETADO.", orden.getId());
         }
 
-        int stockActual = ((Number) stockActualResponse.get("stock")).intValue();
-        int nuevoStock = stockActual - order.getCantidad();
-
-        if (nuevoStock < 0) {
-            throw new IllegalStateException(
-                    "Stock insuficiente. Disponible: " + stockActual + ", solicitado: " + order.getCantidad());
+        List<Order> pendientes = orderRepository.findByEstado(OrderStatus.PENDIENTE);
+        for (Order orden : pendientes) {
+            orden.setEstado(OrderStatus.PROCESADO);
+            orderRepository.save(orden);
+            log.info("Orden {} avanzada de PENDIENTE a PROCESADO.", orden.getId());
         }
+    }
 
-        Order savedOrder = orderRepository.save(order);
+    @Scheduled(fixedDelay = 30000)
+    public void sincronizarPendientes() {
+        List<Order> pendientes = orderRepository.findByInventarioSincronizadoFalse();
+        if (pendientes.isEmpty()) return;
 
-        Map<String, Object> inventoryRequest = new HashMap<>();
-        inventoryRequest.put("productoCodigo", savedOrder.getProductoCodigo());
-        inventoryRequest.put("almacenCodigo", savedOrder.getAlmacenCodigo());
-        inventoryRequest.put("stock", nuevoStock);
-        HttpEntity<Map<String, Object>> inventoryEntity = new HttpEntity<>(inventoryRequest, headers);
-        try {
-            String inventoryUrl = "http://localhost:8082/api/inventory/update";
-            restTemplate.exchange(inventoryUrl, HttpMethod.POST, inventoryEntity, Object.class);
-            log.info("Inventario actualizado con éxito mediante /update para la orden: {}", savedOrder.getId());
-        } catch (Exception e) {
-            log.error("Error al intentar actualizar el stock en el Microservicio de Inventario: {}", e.getMessage());
+        log.info("Sincronizacion automatica: {} orden(es) pendiente(s) de descontar en inventory.", pendientes.size());
+
+        HttpHeaders headers = new HttpHeaders();
+        headers.setContentType(MediaType.APPLICATION_JSON);
+
+        for (Order orden : pendientes) {
+            try {
+                // Consultar stock actual
+                String getUrl = INVENTORY_BASE + "/" + orden.getProductoCodigo() + "/" + orden.getAlmacenCodigo();
+                ResponseEntity<Map> stockResponse = restTemplate.exchange(
+                        getUrl, HttpMethod.GET, new HttpEntity<>(headers), Map.class);
+                Map stockData = stockResponse.getBody();
+
+                int stockActual = ((Number) stockData.get("stock")).intValue();
+                int nuevoStock = stockActual - orden.getCantidad();
+
+                if (nuevoStock < 0) {
+                    log.warn("Sin stock para sincronizar orden {} ({} en {}). Stock: {}, Pedido: {}. Se reintentara.",
+                            orden.getId(), orden.getProductoCodigo(), orden.getAlmacenCodigo(),
+                            stockActual, orden.getCantidad());
+                    continue;
+                }
+
+                // Descontar stock
+                Map<String, Object> updateBody = new HashMap<>();
+                updateBody.put("productoCodigo", orden.getProductoCodigo());
+                updateBody.put("almacenCodigo", orden.getAlmacenCodigo());
+                updateBody.put("stock", nuevoStock);
+
+                restTemplate.exchange(INVENTORY_BASE + "/update",
+                        HttpMethod.POST, new HttpEntity<>(updateBody, headers), Object.class);
+
+                orden.setInventarioSincronizado(true);
+                orderRepository.save(orden);
+                log.info("Orden {} sincronizada: stock de '{}' en '{}' reducido de {} a {}.",
+                        orden.getId(), orden.getProductoCodigo(), orden.getAlmacenCodigo(),
+                        stockActual, nuevoStock);
+
+            } catch (Exception e) {
+                log.debug("Inventory MS aun no disponible para sincronizar orden {}: {}", orden.getId(), e.getMessage());
+            }
         }
-        return savedOrder;
     }
 }
